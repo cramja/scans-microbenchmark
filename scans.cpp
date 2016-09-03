@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -8,8 +9,10 @@
 #include <random>
 #include <string.h>
 #include <sys/mman.h>
-#include <time.h>
 #include <vector>
+#include <memory>
+
+#include "scans.hpp"
 
 #define BILLION 1000000000l
 
@@ -18,104 +21,38 @@ uint64_t total_attrs = 10;
 uint64_t proj_attrs = 4;
 float selectivity = 0.1;
 
-
-
-// simple mmap'd buffer with randomized contents
-struct Buffer {
-  const uint64_t size_;  // size in 64 bit words
-  const uint64_t size_bytes_;
-  uint64_t *buf_;
-  uint64_t buf_index_;
-
-  Buffer(uint64_t size) : size_(size), size_bytes_(sizeof(uint64_t) * size_), buf_(nullptr), buf_index_(0) {
-    buf_ = reinterpret_cast<uint64_t*>(malloc(size_bytes_));
-  }
-
-  ~Buffer() {
-    free(buf_);
-  }
-
-  // uniformly randomizes the buffer
-  void randomize() {
-    std::default_random_engine generator;
-    std::uniform_int_distribution<uint64_t> distribution(0,UINT64_MAX);
-    for (uint64_t i = 0; i < size_; i++) {
-      buf_[i] = distribution(generator);
-    }
-  }
-
-  // appends a value to the buffer
-  void append(uint64_t value) {
-    if (buf_index_ < size_) {
-      buf_[buf_index_] = value;
-      buf_index_++;
-    } else {
-      throw new std::out_of_range("overran append in buffer");
-    }
-  }
-};
-
-// doesn't grow, set size in advance
-class BitVector {
-  uint64_t capacity_;
-  uint64_t size_;
-  uint64_t *buf_;
-
-  BitVector(uint64_t capacity) : capacity_(capacity), size_(0), buf_(nullptr) {
-    buf_ = reinterpret_cast<uint64_t*>(malloc(capacity_ / sizeof(uint64_t) + 1));
-  }
-
-  ~BitVector() {
-    free(buf_);
-  }
-
-  void append(bool value) {
-    if (value) {
-      uint64_t word_index = size_ / sizeof(uint64_t);
-      uint64_t *word = &buf_[word_index];
-      *word |= (1 << (size_ % sizeof(uint64_t)));
-    }
-    size_++;
-  }
-
-    
-
-};
-
-Buffer* rowScan(const Buffer& buf, float selectivity) {
+/**
+ * returns time (s) it takes to run a row scan
+ */
+double rowScan(const Buffer& buf, float selectivity) {
   uint64_t predicate = selectivity * UINT64_MAX;
   uint64_t tuple_length = total_attrs * 8;
+  std::unique_ptr<Buffer> output_buf(new Buffer( (selectivity + 0.1) * buf.size_));
 
-  struct timespec timeFirst;
-  struct timespec timeLast;
-  clock_gettime(CLOCK_MONOTONIC, &timeFirst);
+  std::chrono::time_point<std::chrono::high_resolution_clock> start_time, end_time;
+  start_time = std::chrono::high_resolution_clock::now();
 
-
-  Buffer *output_buf = new Buffer( (selectivity + 0.1) * buf.size_);
   for (uint64_t tuple_index = 0; tuple_index < buf.size_; tuple_index += tuple_length) {
     if (buf.buf_[tuple_index] < predicate) {
       memcpy(&output_buf->buf_[output_buf->buf_index_], &buf.buf_[buf.buf_index_], proj_attrs);
       output_buf->buf_index_ += proj_attrs;
     }
   }
-  clock_gettime(CLOCK_MONOTONIC, &timeLast);
-  printf("-> %li ns\n", \
-            (timeLast.tv_sec - timeFirst.tv_sec) * BILLION + (timeLast.tv_nsec - timeFirst.tv_nsec));
-
-  return output_buf;
+  
+  end_time = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> elapsed = end_time - start_time;
+  
+  return elapsed.count();
 }
 
-Buffer* columnScan(const Buffer& buf, float selectivity) {
+double columnScan(const Buffer& buf, float selectivity) {
   uint64_t predicate = selectivity * UINT64_MAX;
   uint64_t size_column = buf.size_/total_attrs;
   std::vector<bool> select(size_column);
-  Buffer *output_buf = new Buffer( (selectivity + 0.1) * buf.size_);
+  std::unique_ptr<Buffer> output_buf(new Buffer( (selectivity + 0.1) * buf.size_));
   
-  struct timespec timeFirst;
-  struct timespec timeLast;
-  clock_gettime(CLOCK_MONOTONIC, &timeFirst);
-
-
+  std::chrono::time_point<std::chrono::high_resolution_clock> start_time, end_time;
+  start_time = std::chrono::high_resolution_clock::now();
 
   // first, find the selected tuples and mark in bitvector
   for (uint64_t tattr_index = 0; tattr_index < size_column; tattr_index++) {
@@ -132,25 +69,21 @@ Buffer* columnScan(const Buffer& buf, float selectivity) {
       }
     } 
   }
-  clock_gettime(CLOCK_MONOTONIC, &timeLast);
-  printf("-> %li ns\n", \
-            (timeLast.tv_sec - timeFirst.tv_sec) * BILLION + (timeLast.tv_nsec - timeFirst.tv_nsec));
 
-
-  return output_buf;
+  end_time = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> elapsed = end_time - start_time;
+  
+  return elapsed.count();
 }
 
 int main() {
 
-  // do row style scan
-  Buffer buf = Buffer(100000);
+  uint64_t size_buffer_bytes = 2 << 20; // 1 gb
+  Buffer buf = Buffer(size_buffer_bytes);
   buf.randomize();
 
-  Buffer* output = rowScan(buf, selectivity);
-  delete output;
-  
-  output = columnScan(buf, selectivity);
-  delete output;
+  std::cout << "rs: " << rowScan(buf, selectivity) << " s" << std::endl;
+  std::cout << "cs: " << columnScan(buf, selectivity) << " s" << std::endl; 
 
   return 0;
 }

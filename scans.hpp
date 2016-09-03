@@ -5,12 +5,13 @@
 #include <errno.h>
 #include <exception>
 #include <iostream>
+#include <fstream>
 #include <random>
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 #include <vector>
-
 
 /**
  * Simple malloc'd buffer
@@ -37,6 +38,9 @@ struct Buffer {
    * uniformly randomizes the buffer
    */
   void randomize() {
+    if (load_random()) {
+      return;
+    }
     uint64_t x = 213523143, y = 5423323388, z = 321543134;
 	
     for (uint64_t i = 0; i < size_; i++) {
@@ -52,6 +56,7 @@ struct Buffer {
 
       buf_[i] = z;
     }
+    save_random();
   }
 
   // appends a value to the buffer
@@ -62,6 +67,50 @@ struct Buffer {
     } else {
       throw new std::out_of_range("overran append in buffer");
     }
+  }
+ private:
+
+  bool file_exists(const std::string& fname) {
+    return (access(fname.c_str(), F_OK) != -1);
+  }
+
+  // try to find a random buffer file.
+  bool load_random() {
+    std::string fname = "rand_" + std::to_string(size_bytes_) + ".bin";
+    if (!file_exists(fname)) {
+      return false;
+    }
+    std::ifstream infile;
+    infile.open(fname.c_str(), std::ios::binary | std::ios::in);
+    uint64_t chunk_size = 1 << 20; // 1mb reads
+    uint64_t remaining = size_bytes_;
+    char *rptr = (char*)buf_;
+    while (remaining > 0) {
+      if (remaining < chunk_size)
+        chunk_size = remaining;
+      infile.read(rptr, chunk_size);
+      rptr += chunk_size;
+      remaining -= chunk_size;
+    }
+    infile.close();
+    return true;
+  }
+
+  void save_random() {
+    std::string fname = "rand_" + std::to_string(size_bytes_) + ".bin";
+    std::ofstream outfile;
+    outfile.open(fname.c_str(), std::ios::binary | std::ios::out);
+    uint64_t chunk_size = 1 << 10; // 1kb reads
+    uint64_t remaining = size_bytes_;
+    char *rptr = (char*)buf_;
+    while (remaining > 0) {
+      if (remaining < chunk_size)
+        chunk_size = remaining;
+      outfile.write(rptr, chunk_size);
+      rptr += chunk_size;
+      remaining -= chunk_size;
+    }
+    outfile.close();
   }
 };
 

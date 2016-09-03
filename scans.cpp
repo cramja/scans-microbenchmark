@@ -78,7 +78,7 @@ double columnScan(const Buffer& buf, float selectivity) {
 
 int main() {
 
-  uint64_t size_buffer_bytes = 2 << 20; // 1 gb
+  uint64_t size_buffer_bytes = ((uint64_t)1) << 28; // 2 gb
   Buffer buf = Buffer(size_buffer_bytes);
   buf.randomize();
 

@@ -55,8 +55,8 @@ struct Buffer {
     }
     save_random();
   }
-
-  // appends a value to the buffer
+  
+	// appends a value to the buffer
   void append(uint64_t value) {
     if (buf_index_ < size_) {
       buf_[buf_index_] = value;
@@ -108,6 +108,111 @@ struct Buffer {
     outfile.close();
   }
 };
+
+class Table {
+ protected:
+	uint64_t size_tuples_;
+	uint64_t max_size_tuples_;
+	uint64_t num_attributes_;
+	uint64_t size_bytes_;
+	uint64_t *buf_;
+
+ public:
+	Table(uint64_t max_size_tuples, uint64_t num_attributes)
+		: size_tuples_(0),
+		  max_size_tuples_(max_size_tuples),
+			num_attributes_(num_attributes),
+			size_bytes_(max_size_tuples_ * num_attributes_ * sizeof(uint64_t)),
+			buf_(reinterpret_cast<uint64_t*>(malloc(size_bytes_))) {}
+
+	~Table() {free(buf_);}
+
+  uint64_t size_tuples() const {
+		return size_tuples_;
+	}
+
+  virtual void copyRow(uint64_t *src) = 0;
+
+	virtual uint64_t getValue(uint64_t row, uint64_t col) const = 0;
+};
+
+class RowTable : public Table {
+ public:
+  RowTable(uint64_t max_size_tuples, uint64_t num_attributes)
+		: Table(max_size_tuples, num_attributes) { }
+
+  virtual void copyRow(uint64_t *src) {
+	  const uint64_t *dst = buf_ + (size_tuples_ * num_attributes_);
+		memcpy((void*) dst, (void*) src, sizeof(uint64_t) * num_attributes_);
+		size_tuples_++;
+	}
+
+	uint64_t* getTupleAddress(uint64_t row) const {
+    return &buf_[row * num_attributes_];
+	}
+
+	uint64_t getValue(uint64_t row, uint64_t col) const {
+		return buf_[num_attributes_ * row + col];
+	}
+};
+
+RowTable* GetRandomRT(uint64_t size_tuples, uint64_t num_attributes) {
+	RowTable* rt = new RowTable(size_tuples, num_attributes);
+  Buffer buf(size_tuples * num_attributes);
+	buf.randomize();
+	uint64_t *curr_tuple = buf.buf_;
+	for (uint64_t tuple = 0; tuple < size_tuples; tuple++) {
+		rt->copyRow(curr_tuple);
+		curr_tuple = curr_tuple + num_attributes;
+	}
+	return rt;
+}
+
+class ColumnTable : public Table {
+  const uint64_t size_column_;
+	uint64_t insert_row_;
+	uint64_t insert_col_;
+
+ public:
+	ColumnTable(uint64_t max_size_tuples, uint64_t num_attributes) 
+		: Table(max_size_tuples, num_attributes),
+		  size_column_(max_size_tuples_ * sizeof(uint64_t)),
+ 			insert_row_(0),
+			insert_col_(0)	{}
+
+  virtual void copyRow(uint64_t *src) {
+		for (uint64_t col = 0; col < num_attributes_; col++) {
+			buf_[(max_size_tuples_ * col) + size_tuples_] = src[col];
+		}
+		size_tuples_++;
+	}
+
+  uint64_t getValue(uint64_t row, uint64_t col) const {
+		return buf_[max_size_tuples_ * col + row];
+	}
+
+	void beginInsert() {
+		insert_row_ = 0;
+		insert_col_ = 0;
+	}
+
+	void appendToCurrentColumn(uint64_t value) {
+		buf_[insert_col_ * max_size_tuples_ + insert_row_] = value;
+
+		if (insert_col_ == 0) {
+			size_tuples_++;
+		}
+		insert_row_++;
+	}
+
+	void insertNewColumn() {
+		insert_row_ = 0;
+		insert_col_ ++;
+	}
+
+	
+};
+
 
 // doesn't grow, set size in advance
 // can only append and iterate forward
@@ -169,3 +274,17 @@ class BitVector {
     return result;
   }
 };
+
+ColumnTable* GetRandomCT(uint64_t size_tuples, uint64_t num_attributes) {
+	ColumnTable* ct = new ColumnTable(size_tuples, num_attributes);
+  Buffer buf(size_tuples * num_attributes);
+	buf.randomize();
+	uint64_t *curr_tuple = buf.buf_;
+	for (uint64_t tuple = 0; tuple < size_tuples; tuple++) {
+		ct->copyRow(curr_tuple);
+		curr_tuple += num_attributes;
+	}
+	return ct;
+}
+
+

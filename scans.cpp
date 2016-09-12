@@ -15,33 +15,24 @@
 #include "scans.hpp"
 
 #define BILLION 1000000000l
+#define MILLION 1000000l
 
 // edit these params
 uint64_t total_attrs = 10;
 uint64_t proj_attrs = 4;
-float selectivity = 0.3;
+float selectivity = 0.01;
 
-/**
- * returns time (s) it takes to run a row scan
- */
-double rowScan(const Buffer& buf, float selectivity) {
-  uint64_t predicate = selectivity * UINT64_MAX;
-  uint64_t tuple_length = total_attrs * 8;
-  std::unique_ptr<Buffer> output_buf(
-      new Buffer((selectivity + 0.1) * buf.size_));
 
+double scan(const RowTable& src, RowTable &dst, uint64_t predicate) {
   std::chrono::time_point<std::chrono::high_resolution_clock> start_time,
       end_time;
   start_time = std::chrono::high_resolution_clock::now();
 
-  for (uint64_t tuple_index = 0; tuple_index < buf.size_;
-       tuple_index += tuple_length) {
-    if (buf.buf_[tuple_index] < predicate) {
-      memcpy(&output_buf->buf_[output_buf->buf_index_],
-             &buf.buf_[buf.buf_index_], proj_attrs);
-      output_buf->buf_index_ += proj_attrs;
-    }
-  }
+  for (uint64_t row = 0; row < src.size_tuples(); row++) {
+		if (src.getValue(row, 0) < predicate) {
+			dst.copyRow(src.getTupleAddress(row));
+		}
+	}
 
   end_time = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> elapsed = end_time - start_time;
@@ -49,32 +40,29 @@ double rowScan(const Buffer& buf, float selectivity) {
   return elapsed.count();
 }
 
-double columnScan(const Buffer& buf, float selectivity) {
-  uint64_t predicate = selectivity * UINT64_MAX;
-  uint64_t size_column = buf.size_ / total_attrs;
-  std::vector<bool> select(size_column);
-  std::unique_ptr<Buffer> output_buf(
-      new Buffer((selectivity + 0.1) * buf.size_));
-
-  std::chrono::time_point<std::chrono::high_resolution_clock> start_time,
+double scan(const ColumnTable &src, ColumnTable &dst, uint64_t predicate) {
+  BitVector bv(src.size_tuples());
+	
+	std::chrono::time_point<std::chrono::high_resolution_clock> start_time,
       end_time;
   start_time = std::chrono::high_resolution_clock::now();
 
-  // first, find the selected tuples and mark in bitvector
-  for (uint64_t tattr_index = 0; tattr_index < size_column; tattr_index++) {
-    if (buf.buf_[tattr_index] < predicate) {
-      select[tattr_index] = true;
-    }
-  }
+  for (uint64_t row = 0; row < src.size_tuples(); row++) {
+		bv.append(src.getValue(row, 0) < predicate);
+	}
+	bv.finalize();
 
-  // now project into columns
-  for (uint64_t col_index = 0; col_index < proj_attrs; col_index++) {
-    for (uint64_t tuple_index = 0; tuple_index < size_column; tuple_index++) {
-      if (select[tuple_index]) {
-        output_buf->append(buf.buf_[col_index * size_column + tuple_index]);
-      }
-    }
-  }
+	dst.beginInsert();
+	for (uint64_t col = 0; col < total_attrs; col++) {
+		for (uint64_t row = 0; row < src.size_tuples(); row++) {
+		  if (bv.next()) {
+				dst.appendToCurrentColumn(src.getValue(row, col));
+			}	
+		}
+		dst.insertNewColumn();
+		bv.finalize();		
+	}
+
 
   end_time = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> elapsed = end_time - start_time;
@@ -82,48 +70,34 @@ double columnScan(const Buffer& buf, float selectivity) {
   return elapsed.count();
 }
 
-double columnScanBV(const Buffer& buf, float selectivity) {
-  uint64_t predicate = selectivity * UINT64_MAX;
-  uint64_t size_column = buf.size_ / total_attrs;
-  BitVector bv(size_column);
-  std::unique_ptr<Buffer> output_buf(
-      new Buffer((selectivity + 0.1) * buf.size_));
+void run(std::string scan_type) {
+	uint64_t size_src_table_tuples = MILLION;
+	uint64_t size_dst_table_tuples = size_src_table_tuples * selectivity + 1000;
+	uint64_t num_attributes = 10;
+	uint64_t predicate = (uint64_t) (selectivity * (float)(UINT64_MAX));
 
-  std::chrono::time_point<std::chrono::high_resolution_clock> start_time,
-      end_time;
-  start_time = std::chrono::high_resolution_clock::now();
 
-  // first, find the selected tuples and mark in bitvector
-  for (uint64_t tattr_index = 0; tattr_index < size_column; tattr_index++) {
-    bv.append(buf.buf_[tattr_index] < predicate);
-  }
-
-  bv.finalize();
-
-  // now project into columns
-  for (uint64_t col_index = 0; col_index < proj_attrs; col_index++) {
-    for (uint64_t tuple_index = 0; tuple_index < size_column; tuple_index++) {
-      if (bv.next()) {
-        output_buf->append(buf.buf_[col_index * size_column + tuple_index]);
-      }
-    }
-    bv.finalize();  // reset state
-  }
-
-  end_time = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double> elapsed = end_time - start_time;
-
-  return elapsed.count();
+	double exetime = 0.0;
+	if (scan_type == "rs") {
+		std::unique_ptr<RowTable> rt(GetRandomRT(size_src_table_tuples, num_attributes));
+		std::unique_ptr<RowTable> rtd(new RowTable(size_dst_table_tuples, num_attributes));
+		exetime = scan(*rt, *rtd, predicate);
+	} else if (scan_type == "cs") {
+		std::unique_ptr<ColumnTable> ct(GetRandomCT(size_src_table_tuples, num_attributes));
+		std::unique_ptr<ColumnTable> ctd(new ColumnTable(size_dst_table_tuples, num_attributes));
+		exetime = scan(*ct, *ctd, predicate);
+	} else if (scan_type == "dm") {
+		exetime = 0;
+	} else {
+		std::cout << "Unrecongized scan type: " << scan_type << std::endl;
+		return;
+	}
+  std::cout << scan_type << ":\t" << std::to_string(exetime) << std::endl;
 }
 
-int main() {
-  uint64_t size_buffer_bytes = ((uint64_t)1) << 28;  // 2 gb
-  Buffer buf = Buffer(size_buffer_bytes);
-  buf.randomize();
 
-  std::cout << "rs:    " << rowScan(buf, selectivity) << " s" << std::endl;
-  std::cout << "cs:    " << columnScan(buf, selectivity) << " s" << std::endl;
-  std::cout << "cs-bv: " << columnScanBV(buf, selectivity) << " s" << std::endl;
-
+int main(int argc, char **argv) {
+	assert(argc > 1);
+	run(std::string(argv[1]));
   return 0;
 }
